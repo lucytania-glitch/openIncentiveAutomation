@@ -1,0 +1,94 @@
+# 1. Install library yang dibutuhkan
+!pip install gspread pandas -q
+
+# 2. Login langsung dengan Akun Sawitpro Anda
+from google.colab import auth
+print("🔑 Meminta izin akses akun Sawitpro...")
+auth.authenticate_user()
+
+import gspread
+from google.auth import default
+import pandas as pd
+
+# 3. Hubungkan gspread menggunakan izin akun Sawitpro Anda
+creds, _ = default()
+client = gspread.authorize(creds)
+print("✅ Berhasil login dengan akun organisasi!")
+
+# 4. Masukkan Link Google Sheet Anda
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1m59LSfuhuKZMUGB7yIz8Q6R9QnN3l6apCizee7PU8fw/edit?usp=sharing"
+WORKSHEET_NAME = "Incentive_raw_data_metabase_flagged_cleaned_item"
+
+print("📄 Membuka spreadsheet...")
+spreadsheet = client.open_by_url(SHEET_URL)
+print(f"📄 Berhasil membuka spreadsheet: '{spreadsheet.title}'")
+
+# Buka worksheet / tab sheet
+try:
+    worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+except Exception:
+    worksheet = spreadsheet.worksheets()[0]
+print(f"✅ Berhasil mengakses tab: '{worksheet.title}'")
+
+# 5. Ambil data ke Pandas DataFrame
+all_values = worksheet.get_all_values()
+headers = all_values[0]
+data_rows = all_values[1:]
+df = pd.DataFrame(data_rows, columns=headers)
+total_rows = len(df)
+print(f"📊 Total baris data: {total_rows:,} baris")
+
+# 6. Cari kolom acuan kriteria Exact Double
+TARGET_CRITERIA_TEXT = "Yes - Exact Double Input (Same Item & Identical Financials)"
+NEW_FLAG_COLUMN_NAME = "flagged_item_level_duplicate"  # Nama kolom baru yang dibuat
+
+source_col = None
+for col in df.columns:
+    if df[col].astype(str).str.contains("Exact Double", case=False, na=False).any():
+        source_col = col
+        break
+
+if not source_col:
+    print(f"⚠️ Kolom acuan tidak ditemukan. Kolom yang ada:\n{headers}")
+else:
+    print(f"🎯 Kolom acuan terdeteksi: '{source_col}'")
+
+    # 7. Evaluasi: TRUE untuk exact double, FALSE untuk normal
+    target_clean = TARGET_CRITERIA_TEXT.strip().lower()
+    is_duplicate = df[source_col].astype(str).str.strip().str.lower().str.contains("exact double input", na=False)
+    flag_values = is_duplicate.apply(lambda x: "TRUE" if x else "FALSE")
+    
+    dup_count = (flag_values == "TRUE").sum()
+    norm_count = (flag_values == "FALSE").sum()
+
+    print(f"\n🔍 Ringkasan Deteksi:")
+    print(f"   • Exact Double Input (TRUE) : {dup_count:,} baris")
+    print(f"   • Non-Duplikat       (FALSE): {norm_count:,} baris")
+
+    # 8. Buat KOLOM BARU di paling kanan spreadsheet
+    total_cols = len(headers)
+    if NEW_FLAG_COLUMN_NAME in headers:
+        target_col_idx = headers.index(NEW_FLAG_COLUMN_NAME) + 1
+        print(f"\n📌 Kolom '{NEW_FLAG_COLUMN_NAME}' sudah ada di kolom ke-{target_col_idx}. Nilai akan diperbarui.")
+    else:
+        target_col_idx = total_cols + 1
+        # Cek jika indeks kolom target melebihi batas kolom grid saat ini
+        current_cols_count = worksheet.col_count
+        if target_col_idx > current_cols_count:
+            print(f"\n⚡ Menambahkan kolom baru ke grid Google Sheet karena batas kolom terlampaui...")
+            worksheet.add_cols(target_col_idx - current_cols_count)
+        
+        worksheet.update_cell(1, target_col_idx, NEW_FLAG_COLUMN_NAME)
+        print(f"\n➕ Berhasil membuat KOLOM BARU '{NEW_FLAG_COLUMN_NAME}' di kolom ke-{target_col_idx}")
+
+    # 9. Tuliskan nilai TRUE / FALSE ke kolom baru secara batch
+    print(f"💾 Menuliskan nilai TRUE / FALSE ke Google Sheet...")
+    update_payload = [[val] for val in flag_values.tolist()]
+    
+    start_cell = gspread.utils.rowcol_to_a1(2, target_col_idx)
+    end_cell = gspread.utils.rowcol_to_a1(total_rows + 1, target_col_idx)
+    range_target = f"{start_cell}:{end_cell}"
+
+    worksheet.update(range_target, update_payload)
+    print(f"🎉 SUKSES! Kolom baru berhasil diisi pada rentang: {range_target}")
+    print(f"💡 Anda sekarang bisa memfilter kolom '{NEW_FLAG_COLUMN_NAME}' = TRUE untuk melihat baris yang perlu dihapus di CRM.")
